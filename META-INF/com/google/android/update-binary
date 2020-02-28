@@ -20,7 +20,11 @@ ui_print " ";
 # /dev/tmp is safe for both booted and recovery installs
 tmp=/dev/tmp/twrp-install;
 # target partition without the slot suffix
-target=/dev/block/bootdevice/by-name/boot;
+if [ -e /dev/block/bootdevice/by-name/recovery_a ]; then
+  target=/dev/block/bootdevice/by-name/recovery;
+else
+  target=/dev/block/bootdevice/by-name/boot;
+fi;
 
 ui_print "Unpacking the installer...";
 ui_print " ";
@@ -29,41 +33,59 @@ mkdir -p $tmp;
 unzip -o "$ZIPFILE" -d $tmp || abort "Failed to extract zip!";
 
 cd $tmp;
-tool=$tmp/magiskboot;
-recoverycpio=`(ls ramdisk-twrp.cpio || ls ramdisk-recovery.cpio) 2>/dev/null`;
-test "$recoverycpio" || abort "No TWRP ramdisk cpio found!";
+case $target in
+  *recovery)
+    recoveryimg=`(ls twrp.img || ls recovery.img) 2>/dev/null`;
+    test "$recoveryimg" || abort "No TWRP image found!";
+  ;;
+  *)
+    recoveryimg=new-boot.img;
+    recoverycpio=`(ls ramdisk-twrp.cpio || ls ramdisk-recovery.cpio) 2>/dev/null`;
+    test "$recoverycpio" || abort "No TWRP ramdisk cpio found!";
+    tool=$tmp/magiskboot;
+    chmod 755 $tool;
+  ;;
+esac;
 
-chmod 755 $tool;
+for slot in _a _b; do
+  if [ "$recoverycpio" ]; then
+    ui_print "Running boot image patcher on slot $slot...";
+    dd bs=1048576 if=$target$slot of=boot.img || abort "Failed to dump boot image!";
+    $tool unpack -h boot.img || abort "Failed to unpack boot image!";
 
-for slot in a b; do
-  ui_print "Running boot image patcher on slot $slot...";
-  slot=_$slot;
-  dd bs=1048576 if=$target$slot of=boot.img;
-  $tool unpack -h boot.img;
+    # kernel string want_initramfs -> skip_initramfs (Magisk)
+    $tool hexpatch kernel 77616E745F696E697472616D6673 736B69705F696E697472616D6673;
+    # kernel string trip_initramfs -> skip_initramfs (SuperSU)
+    $tool hexpatch kernel 747269705F696E697472616D6673 736B69705F696E697472616D6673;
 
-  # kernel string want_initramfs -> skip_initramfs (Magisk)
-  $tool hexpatch kernel 77616E745F696E697472616D6673 736B69705F696E697472616D6673;
-  # kernel string trip_initramfs -> skip_initramfs (SuperSU)
-  $tool hexpatch kernel 747269705F696E697472616D6673 736B69705F696E697472616D6673;
+    # boot.img header cmdline remove skip_override (flar2 patch)
+    sed -i "s|$(grep '^cmdline=' header | cut -d= -f2-)|$(grep '^cmdline=' header | cut -d= -f2- | sed -e 's/skip_override//' -e 's/  */ /g' -e 's/[ \t]*$//')|" header;
 
-  # boot.img header cmdline remove skip_override (flar2 patch)
-  sed -i "s|$(grep '^cmdline=' header | cut -d= -f2-)|$(grep '^cmdline=' header | cut -d= -f2- | sed -e 's/skip_override//' -e 's/  */ /g' -e 's/[ \t]*$//')|" header;
-
-  cp -f $recoverycpio ramdisk.cpio;
-  $tool repack boot.img;
-  cat new-boot.img /dev/zero > $target$slot 2>/dev/null || true;
-
-  $tool cleanup;
-  rm -f new-boot.img;
+    cp -f $recoverycpio ramdisk.cpio;
+    $tool repack boot.img || abort "Failed to repack boot image!";
+  else
+    ui_print "Flashing recovery image on slot $slot...";
+  fi;
+  cat $recoveryimg /dev/zero > $target$slot 2>/dev/null || true;
+  if [ "$recoverycpio" ]; then
+    $tool cleanup;
+    rm -f $recoveryimg;
+  fi;
 done;
 
 ui_print " ";
-ui_print "Boot image patching complete!";
+if [ "$recoverycpio" ]; then
+  ui_print "Boot image patching complete!";
+else
+  ui_print "Recovery image flashing complete!";
+fi;
 
 cd /;
 rm -rf /dev/tmp;
 
 ui_print " ";
 ui_print "Done installing TWRP!";
-ui_print " ";
-ui_print "*** NOTE: You are now unrooted! ***";
+if [ "$recoverycpio" ]; then
+  ui_print " ";
+  ui_print "*** NOTE: You are now unrooted! ***";
+fi;
